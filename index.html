@@ -1,4 +1,97 @@
-<!doctype html>
+# Write a Cloudflare Worker script and a GitHub-ready HTML file that uses it.
+worker_js = r"""export default {
+  async fetch(request, env, ctx) {
+    // Config: feeds to fetch server-side (no CORS issues)
+    const feeds = [
+      { name: "MSRC Security Updates", url: "https://msrc.microsoft.com/update-guide/rss" },
+      { name: "BleepingComputer", url: "https://www.bleepingcomputer.com/feed/" },
+      { name: "Windows Release Health", url: "https://learn.microsoft.com/en-us/feed/rss/windows/release-health" }
+    ];
+
+    // Optional querystring: ?days=21&query=keyword  (filter server-side)
+    const { searchParams } = new URL(request.url);
+    const days = Math.max(1, Math.min(90, parseInt(searchParams.get("days") || "21", 10)));
+    const query = (searchParams.get("query") || "").toLowerCase();
+
+    function withinDays(date, days){
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const cutoff = new Date(start.getTime() - (days * 24 * 60 * 60 * 1000));
+      return date >= cutoff && date <= now;
+    }
+
+    function parse(xmlText, sourceName){
+      const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+      const out = [];
+      doc.querySelectorAll("channel > item").forEach(item => {
+        const title = item.querySelector("title")?.textContent?.trim() || "(no title)";
+        const link = item.querySelector("link")?.textContent?.trim() || item.querySelector("guid")?.textContent?.trim() || "";
+        const dateStr = item.querySelector("pubDate")?.textContent || item.querySelector("dc\\:date")?.textContent || "";
+        const pub = dateStr ? new Date(dateStr) : new Date();
+        const desc = item.querySelector("description")?.textContent || "";
+        out.push({ title, link, pub: pub.toISOString(), source: sourceName, description: desc });
+      });
+      doc.querySelectorAll("feed > entry").forEach(entry => {
+        const title = entry.querySelector("title")?.textContent?.trim() || "(no title)";
+        const linkEl = entry.querySelector("link[rel='alternate']") || entry.querySelector("link[href]");
+        const link = linkEl?.getAttribute("href") || "";
+        const dateStr = entry.querySelector("updated")?.textContent || entry.querySelector("published")?.textContent || "";
+        const pub = dateStr ? new Date(dateStr) : new Date();
+        const desc = entry.querySelector("summary")?.textContent || entry.querySelector("content")?.textContent || "";
+        out.push({ title, link, pub: pub.toISOString(), source: sourceName, description: desc });
+      });
+      return out;
+    }
+
+    async function fetchText(url){
+      const res = await fetch(url, { cf: { cacheTtl: 300, cacheEverything: true } });
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.text();
+    }
+
+    let items = [];
+    const errors = [];
+
+    // Fetch feeds in parallel server-side
+    const results = await Promise.allSettled(feeds.map(async f => {
+      try {
+        const xml = await fetchText(f.url);
+        return { f, xml };
+      } catch (e) {
+        return { f, error: e.message };
+      }
+    }));
+
+    // Parse and filter
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value.xml) {
+        const parsed = parse(r.value.xml, r.value.f.name);
+        for (const it of parsed) {
+          const pub = new Date(it.pub);
+          if (!withinDays(pub, days)) continue;
+          if (query && !( (it.title||"") + " " + (it.description||"") ).toLowerCase().includes(query)) continue;
+          items.push(it);
+        }
+      } else {
+        errors.push(r.value?.f?.name || "Unknown");
+      }
+    }
+
+    // Sort newest -> oldest
+    items.sort((a,b) => new Date(b.pub) - new Date(a.pub));
+
+    return new Response(JSON.stringify({ items, errors }), {
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*"
+      }
+    });
+  }
+};"""
+with open("/mnt/data/security-alerts-worker.js", "w", encoding="utf-8") as f:
+    f.write(worker_js)
+
+html = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -19,7 +112,7 @@
     .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
     .col-3{grid-column:span 3}.col-9{grid-column:span 9}
     @media (max-width:980px){.col-3,.col-9{grid-column:1/-1}}
-    input[type="search"], select, textarea{background:#0e1628;border:1px solid #30415f;color:var(--text);padding:10px 12px;border-radius:10px;min-width:220px}
+    input[type='search'], select, textarea{background:#0e1628;border:1px solid #30415f;color:var(--text);padding:10px 12px;border-radius:10px;min-width:220px}
     textarea{width:100%;min-height:140px}
     .hint{color:var(--muted);font-size:12px}
     .list{display:grid;gap:10px;margin-top:12px}
@@ -27,7 +120,6 @@
     .date{color:#cbd5e1;font-weight:700}
     .srcTag{font-size:12px;color:#a3b5d6;border:1px solid #2a3a5a;padding:3px 8px;border-radius:999px}
     .item a{color:#93c5fd;text-decoration:none}.item a:hover{text-decoration:underline}
-    .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .count{color:var(--muted)}
     details > summary{cursor:pointer;color:#a5b4fc}
     footer{color:#64748b;margin:40px 0 20px}
@@ -59,7 +151,7 @@
 
         <details class="no-print" open>
           <summary>Customize feeds</summary>
-          <div class="hint" style="margin:10px 0">Paste RSS/Atom feed URLs (one per line). Defaults are already loaded. (Tip: if your network blocks proxies, switch to a Cloudflare Worker and set <code>WORKER_URL</code> below.)</div>
+          <div class="hint" style="margin:10px 0">Paste RSS/Atom feed URLs (one per line). Defaults are already loaded.</div>
           <textarea id="feedsInput"></textarea>
           <div style="display:flex;gap:8px;margin-top:10px">
             <button class="btn" id="saveFeeds">Use These Feeds (this session)</button>
@@ -76,133 +168,39 @@
       </section>
     </div>
 
-    <footer>
-      <div>Tip: Click a headline to open the original alert. Use the search box to filter. Use the Print button to export to PDF.</div>
-    </footer>
+    <footer><div>Tip: Click a headline to open the original alert.</div></footer>
   </main>
 
 <script>
-// ====================== CONFIG ======================
-// Optional: if you create a Cloudflare Worker per my instructions,
-// set this to your worker endpoint (e.g., "https://security-alerts.yourname.workers.dev/").
-// Leave as empty string to use client-side proxy fetching.
-const WORKER_URL = "";
+// ========= REQUIRED: paste your Cloudflare Worker URL ==========
+// After deploying the provided worker, replace the URL below:
+const WORKER_URL = "https://security-alerts.YOURNAME.workers.dev/"; // <-- CHANGE THIS
 
-// Default security-focused feeds:
+// Default feeds (for sidebar display / session overrides)
 const DEFAULT_FEEDS = [
   { name: "MSRC Security Updates", url: "https://msrc.microsoft.com/update-guide/rss" },
   { name: "BleepingComputer", url: "https://www.bleepingcomputer.com/feed/" },
   { name: "Windows Release Health", url: "https://learn.microsoft.com/en-us/feed/rss/windows/release-health" }
 ];
-
-// No storage dependency. Session-only customization:
 let CURRENT_FEEDS = [...DEFAULT_FEEDS];
 
-// =================== UTILITIES ===================
-const dayMs = 24*60*60*1000;
-function withinDays(date, days){
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // midnight today
-  const cutoff = new Date(start.getTime() - (days*dayMs));
-  return date >= cutoff && date <= now;
-}
-function fmtDate(d){
-  return d.toLocaleString(undefined, { year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit' });
-}
-function stripTags(html){
-  const t = document.createElement('div'); t.innerHTML = html; return t.textContent || '';
-}
-function truncate(s, n){ return s.length>n ? s.slice(0,n-1)+'…' : s; }
-function normalize(s){ return (s||'').toLowerCase(); }
+function fmtDate(d){return d.toLocaleString(undefined,{year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'})}
+function stripTags(html){const t=document.createElement('div');t.innerHTML=html;return t.textContent||''}
+function truncate(s,n){return s.length>n?s.slice(0,n-1)+'…':s}
+function normalize(s){return (s||'').toLowerCase();}
 
-// Parse RSS/Atom
-function parseFeed(xmlText, sourceName){
-  const doc = new DOMParser().parseFromString(xmlText, "text/xml");
-  if(doc.querySelector("parsererror")) throw new Error("Invalid XML for "+sourceName);
-  const items = [];
-  doc.querySelectorAll("channel > item").forEach(item => {
-    const title = item.querySelector("title")?.textContent?.trim() || "(no title)";
-    const link = item.querySelector("link")?.textContent?.trim() || item.querySelector("guid")?.textContent?.trim() || "";
-    const dateStr = item.querySelector("pubDate")?.textContent || item.querySelector("dc\:date")?.textContent || "";
-    const pub = dateStr ? new Date(dateStr) : new Date();
-    const desc = item.querySelector("description")?.textContent || "";
-    items.push({title, link, pub, source: sourceName, description: desc});
-  });
-  doc.querySelectorAll("feed > entry").forEach(entry => {
-    const title = entry.querySelector("title")?.textContent?.trim() || "(no title)";
-    const linkEl = entry.querySelector("link[rel='alternate']") || entry.querySelector("link[href]");
-    const link = linkEl?.getAttribute("href") || "";
-    const dateStr = entry.querySelector("updated")?.textContent || entry.querySelector("published")?.textContent || "";
-    const pub = dateStr ? new Date(dateStr) : new Date();
-    const desc = entry.querySelector("summary")?.textContent || entry.querySelector("content")?.textContent || "";
-    items.push({title, link, pub, source: sourceName, description: desc});
-  });
-  return items;
-}
-
-// =================== FETCH LAYER ===================
-const FETCH_TIMEOUT_MS = 9000;
-function fetchWithTimeout(resource, options = {}, ms = FETCH_TIMEOUT_MS){
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), ms);
-  return fetch(resource, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
-}
-
-// Multi-proxy fetch sequence (works well on GitHub Pages)
-async function fetchFeedClientSide(url){
-  const targets = [
-    // r.jina.ai (very CORS-friendly). It expects http scheme in the path:
-    (u)=>'https://r.jina.ai/http://' + u.replace(/^https?:\/\//,''),
-    // AllOrigins raw
-    (u)=>'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
-    // isomorphic-git CORS proxy
-    (u)=>'https://cors.isomorphic-git.org/' + u
-  ];
-  let lastErr;
-  for(const make of targets){
-    const proxyUrl = make(url);
-    try{
-      const res = await fetchWithTimeout(proxyUrl, { cache: 'no-store' });
-      if(!res.ok) throw new Error('HTTP '+res.status);
-      const text = await res.text();
-      if(text && text.length > 50) return text;
-    }catch(e){ lastErr = e; }
-  }
-  throw lastErr || new Error('All proxies failed');
-}
-
-// If a Worker is configured, fetch once and parse each returned xml
-async function fetchViaWorker(){
-  const res = await fetchWithTimeout(WORKER_URL, { cache:'no-store' });
-  if(!res.ok) throw new Error('Worker HTTP '+res.status);
-  const arr = await res.json(); // [{url, xml} or {url, error}]
-  const map = new Map();
-  for(const row of arr){
-    map.set(row.url, row);
-  }
-  return map;
-}
-
-// =================== RENDER ===================
 function renderSources(feeds){
   const wrap = document.getElementById('sourceList'); wrap.innerHTML='';
-  feeds.forEach(f => {
-    const el = document.createElement('div'); el.className='src';
-    el.textContent = f.name; wrap.appendChild(el);
-  });
-  document.getElementById('feedsInput').value = feeds.map(f => `${f.name} | ${f.url}`).join('\n');
+  feeds.forEach(f => { const el = document.createElement('div'); el.className='src'; el.textContent=f.name; wrap.appendChild(el); });
+  document.getElementById('feedsInput').value = feeds.map(f => `${f.name} | ${f.url}`).join('\\n');
 }
 function renderList(items){
-  const list = document.getElementById('list'); const count = document.getElementById('count');
-  list.innerHTML='';
-  if(!items.length){
-    list.innerHTML = '<div class="empty">No items in the selected window. Try expanding the date range or hit Refresh.</div>';
-    count.textContent = '0'; return;
-  }
+  const list=document.getElementById('list'); const count=document.getElementById('count'); list.innerHTML='';
+  if(!items.length){ list.innerHTML='<div class="empty">No items in the selected window.</div>'; count.textContent='0'; return; }
   items.forEach(it => {
-    const row = document.createElement('div'); row.className='item';
+    const row=document.createElement('div'); row.className='item';
     row.innerHTML = `
-      <div class="date">${fmtDate(it.pub)}</div>
+      <div class="date">${fmtDate(new Date(it.pub))}</div>
       <div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="${it.link}" target="_blank" rel="noopener noreferrer">${it.title}</a>
@@ -212,82 +210,27 @@ function renderList(items){
       </div>`;
     list.appendChild(row);
   });
-  count.textContent = String(items.length);
+  count.textContent=String(items.length);
 }
 
-// =================== MAIN ===================
 async function loadAndRender(){
-  const status = document.getElementById('status');
-  status.textContent = 'Fetching feeds…';
-  const feeds = CURRENT_FEEDS;
-  renderSources(feeds);
-
-  const days = parseInt(document.getElementById('dateRange').value, 10) || 21;
-  const query = normalize(document.getElementById('search').value);
-  const allItems = [];
-  const errors = [];
+  const status=document.getElementById('status');
+  status.textContent='Fetching (server)…';
+  const days=parseInt(document.getElementById('dateRange').value,10)||21;
+  const query=encodeURIComponent(normalize(document.getElementById('search').value));
 
   try{
-    if(WORKER_URL){
-      // Use server-side fetcher
-      const map = await fetchViaWorker();
-      for(const f of feeds){
-        const row = map.get(f.url);
-        if(row && row.xml){
-          try{
-            const items = parseFeed(row.xml, f.name);
-            for(const it of items){
-              if(!it.pub || isNaN(it.pub.getTime())) continue;
-              if(!withinDays(it.pub, days)) continue;
-              if(query){
-                const hay = `${it.title} ${it.source} ${it.description}`.toLowerCase();
-                if(!hay.includes(query)) continue;
-              }
-              allItems.push(it);
-            }
-          }catch(e){ errors.push(f.name); }
-        }else{
-          errors.push(f.name);
-        }
-      }
-    }else{
-      // Client-side parallel fetching with timeouts and fallbacks
-      const results = await Promise.allSettled(
-        feeds.map(async (f) => {
-          try{
-            const xml = await fetchFeedClientSide(f.url);
-            const items = parseFeed(xml, f.name);
-            return { f, items };
-          }catch(e){ return { f, error: e }; }
-        })
-      );
-      for(const r of results){
-        if(r.status === 'fulfilled' && r.value.items){
-          const { f, items } = r.value;
-          for(const it of items){
-            if(!it.pub || isNaN(it.pub.getTime())) continue;
-            if(!withinDays(it.pub, days)) continue;
-            if(query){
-              const hay = `${it.title} ${it.source} ${it.description}`.toLowerCase();
-              if(!hay.includes(query)) continue;
-            }
-            allItems.push(it);
-          }
-        }else{
-          errors.push(r.value?.f?.name || 'Unknown');
-        }
-      }
-    }
+    const res=await fetch(`${WORKER_URL}?days=${days}&query=${query}`,{cache:'no-store'});
+    if(!res.ok) throw new Error('Worker HTTP '+res.status);
+    const { items, errors } = await res.json();
+    // Filter by CURRENT_FEEDS if user has customized (server returns all three by default)
+    const allowed=new Set(CURRENT_FEEDS.map(f=>f.name));
+    const filtered=items.filter(it=>allowed.has(it.source));
+    renderList(filtered);
+    if(errors && errors.length){ status.innerHTML = 'Loaded with warnings: '+ errors.join(', '); } else { status.textContent = `Loaded ${filtered.length} item(s).`; }
   }catch(e){
-    errors.push('General load error: '+ e.message);
-  }
-
-  allItems.sort((a,b)=> b.pub - a.pub);
-  renderList(allItems);
-  if(errors.length){
-    status.innerHTML = `Loaded with warnings: Failed to fetch <b>${errors.join(', ')}</b>.`;
-  }else{
-    status.textContent = `Loaded ${allItems.length} item(s).`;
+    status.innerHTML = 'Failed to fetch from Worker. Check WORKER_URL.';
+    renderList([]);
   }
 }
 
@@ -296,16 +239,8 @@ document.getElementById('refreshBtn').addEventListener('click', loadAndRender);
 document.getElementById('dateRange').addEventListener('change', loadAndRender);
 document.getElementById('search').addEventListener('input', () => loadAndRender());
 document.getElementById('saveFeeds').addEventListener('click', () => {
-  const lines = document.getElementById('feedsInput').value.split(/\n+/).map(l=>l.trim()).filter(Boolean);
-  const parsed = lines.map(l => {
-    const parts = l.split('|');
-    if(parts.length >= 2){
-      return { name: parts[0].trim(), url: parts.slice(1).join('|').trim() };
-    } else {
-      try{ const u = new URL(l); return { name: u.hostname, url: l }; }
-      catch{ return null }
-    }
-  }).filter(Boolean);
+  const lines=document.getElementById('feedsInput').value.split(/\\n+/).map(l=>l.trim()).filter(Boolean);
+  const parsed=lines.map(l=>{const parts=l.split('|'); if(parts.length>=2){return {name:parts[0].trim(),url:parts.slice(1).join('|').trim()};} else {try{const u=new URL(l); return {name:u.hostname,url:l};}catch{return null}}}).filter(Boolean);
   CURRENT_FEEDS = parsed.length ? parsed : [...DEFAULT_FEEDS];
   renderSources(CURRENT_FEEDS);
   loadAndRender();
@@ -316,9 +251,47 @@ document.getElementById('resetFeeds').addEventListener('click', () => {
   loadAndRender();
 });
 
-// Initial load
 renderSources(CURRENT_FEEDS);
-loadAndRender();
+</script>
+<script>
+// Auto-load after DOM settles
+window.addEventListener('load', () => {
+  loadAndRender();
+});
 </script>
 </body>
 </html>
+"""
+with open("/mnt/data/security-alerts-github-with-worker.html", "w", encoding="utf-8") as f:
+    f.write(html)
+
+readme = """Cloudflare Worker + GitHub Pages setup
+
+1) Deploy the Worker
+   - Go to https://workers.cloudflare.com
+   - Create a new Service named 'security-alerts'
+   - Replace the default code with the contents of 'security-alerts-worker.js'
+   - Click Deploy
+   - Copy the URL, e.g. https://security-alerts.YOURNAME.workers.dev/
+
+2) Update the HTML
+   - Open 'security-alerts-github-with-worker.html'
+   - Find the line:
+       const WORKER_URL = "https://security-alerts.YOURNAME.workers.dev/"; // <-- CHANGE THIS
+     Replace with your Worker URL.
+
+3) Publish to GitHub Pages
+   - Put the HTML file at Alerts/index.html in your repo and push.
+   - Visit your Pages URL and hard refresh (Ctrl/Cmd+Shift+R).
+
+Notes
+- The Worker fetches the feeds server-side (no CORS issues), merges, filters by 'days' and optional 'query', and returns JSON.
+- The HTML UI handles search, date range, print/save PDF. Customize feeds per session from the sidebar.
+"""
+with open("/mnt/data/README-worker-setup.txt", "w", encoding="utf-8") as f:
+    f.write(readme)
+
+print("Artifacts created:")
+print("- /mnt/data/security-alerts-worker.js")
+print("- /mnt/data/security-alerts-github-with-worker.html")
+print("- /mnt/data/README-worker-setup.txt")
