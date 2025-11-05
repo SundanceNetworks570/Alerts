@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Security Alerts Dashboard (Microsoft • BleepingComputer • Windows)</title>
+  <style>
+    :root{
+      --bg:#0b1220; --card:#121a2b; --muted:#94a3b8; --text:#e2e8f0; --accent:#60a5fa; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444;
+    }
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif}
+    header{position:sticky;top:0;z-index:10;background:linear-gradient(180deg, rgba(11,18,32,.95), rgba(11,18,32,.75) 60%, rgba(11,18,32,0));backdrop-filter:saturate(140%) blur(6px);}
+    .wrap{max-width:1100px;margin:0 auto;padding:16px}
+    .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .title{font-size:20px;font-weight:700;margin-right:auto}
+    .btn{border:1px solid #2b3a55;background:#1a2340;color:var(--text);padding:8px 12px;border-radius:10px;cursor:pointer}
+    .btn:hover{border-color:#486089}
+    .btn:active{transform:translateY(1px)}
+    .src{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px dashed #2b3a55;border-radius:999px;color:var(--muted);font-size:12px}
+    .card{background:var(--card);border:1px solid #1f2c47;border-radius:14px;padding:14px}
+    .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
+    .col-3{grid-column:span 3}
+    .col-9{grid-column:span 9}
+    @media (max-width:980px){.col-3,.col-9{grid-column:1/-1}}
+    input[type="search"], select{background:#0e1628;border:1px solid #30415f;color:var(--text);padding:10px 12px;border-radius:10px;min-width:220px}
+    .hint{color:var(--muted);font-size:12px}
+    .list{display:grid;gap:10px;margin-top:12px}
+    .item{display:grid;grid-template-columns: 120px 1fr;gap:14px;align-items:baseline;border:1px solid #1f2c47;border-radius:12px;padding:12px;background:#0f172a}
+    .date{color:#cbd5e1;font-weight:700}
+    .srcTag{font-size:12px;color:#a3b5d6;border:1px solid #2a3a5a;padding:3px 8px;border-radius:999px}
+    .item a{color:#93c5fd;text-decoration:none}
+    .item a:hover{text-decoration:underline}
+    .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .count{color:var(--muted)}
+    details > summary{cursor:pointer;color:#a5b4fc}
+    footer{color:#64748b;margin:40px 0 20px}
+    .empty{color:#9aa7bd;text-align:center;padding:24px;border:1px dashed #314564;border-radius:12px}
+
+    /* Print styles */
+    @media print{
+      header,.no-print{display:none !important}
+      body{background:#fff;color:#000}
+      .item{border-color:#ddd;background:#fff}
+      a{color:#000}
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap toolbar">
+      <div class="title">Security Alerts (Last 3 Weeks)</div>
+      <input id="search" type="search" placeholder="Filter by keyword… (e.g., CVE, Exchange)" />
+      <select id="dateRange">
+        <option value="21">Past 3 weeks</option>
+        <option value="14">Past 2 weeks</option>
+        <option value="7">Past week</option>
+        <option value="3">Past 3 days</option>
+      </select>
+      <button class="btn" id="refreshBtn" title="Fetch latest now">Refresh</button>
+      <button class="btn" onclick="window.print()" title="Print or Save as PDF">Print / Save PDF</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="grid">
+      <section class="col-3 card">
+        <h3 style="margin:0 0 8px">Sources</h3>
+        <div class="hint">You can edit sources below if you have different feeds.</div>
+        <div id="sourceList" style="display:grid;gap:8px;margin:12px 0"></div>
+        <details class="no-print">
+          <summary>Customize feeds</summary>
+          <div class="hint" style="margin:10px 0">Paste RSS/Atom feed URLs (one per line). Some sites require a CORS proxy; this page uses <code>api.allorigins.win</code>.</div>
+          <textarea id="feedsInput" style="width:100%;min-height:140px;background:#0e1628;border:1px solid #30415f;color:#e2e8f0;border-radius:10px;padding:10px"></textarea>
+          <div style="display:flex;gap:8px;margin-top:10px">
+            <button class="btn" id="saveFeeds">Save Feeds</button>
+            <button class="btn" id="resetFeeds">Reset to Defaults</button>
+          </div>
+        </details>
+        <div style="margin-top:12px" class="hint">
+          Showing <span id="count" class="count">0</span> items
+        </div>
+      </section>
+
+      <section class="col-9">
+        <div id="status" class="hint"></div>
+        <div id="list" class="list"></div>
+      </section>
+    </div>
+
+    <footer>
+      <div>Tip: Click a headline to open the original alert. Use the search box to filter. Use the Print button to export to PDF.</div>
+    </footer>
+  </main>
+
+  <script>
+  // ======= Configuration =======
+  const DEFAULT_FEEDS = [
+    // Security-focused feeds
+    { name: "MSRC Security Updates", url: "https://msrc.microsoft.com/update-guide/rss" },
+    { name: "BleepingComputer", url: "https://www.bleepingcomputer.com/feed/" },
+    { name: "Windows Release Health", url: "https://learn.microsoft.com/en-us/feed/rss/windows/release-health" }
+  ];
+
+  // Use localStorage to persist custom feeds
+  const FEED_STORAGE_KEY = "security_alerts_feeds_v2";
+  
+  function getFeeds(){
+    try{ const saved = JSON.parse(localStorage.getItem(FEED_STORAGE_KEY)); if(Array.isArray(saved) && saved.length) return saved; }catch{}
+    return DEFAULT_FEEDS;
+  }
+  function setFeeds(list){ localStorage.setItem(FEED_STORAGE_KEY, JSON.stringify(list)); }
+
+  // Multi-proxy fetcher to avoid CORS blocks with timeout
+  const FETCH_TIMEOUT_MS = 9000; // per-attempt timeout
+  function fetchWithTimeout(resource, options = {}, ms = FETCH_TIMEOUT_MS){
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), ms);
+    return fetch(resource, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
+  }
+  async function fetchFeedAny(url){
+    const targets = [
+      (u)=>u,
+      (u)=>`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+      (u)=>`https://cors.isomorphic-git.org/${u}`,
+      (u)=>`https://r.jina.ai/http://` + u.replace(/^https?:\/\//,'')
+    ];
+    let lastErr;
+    for(const make of targets){
+      const proxyUrl = make(url);
+      try{
+        const res = await fetchWithTimeout(proxyUrl, { cache:'no-store' });
+        if(!res.ok) throw new Error(`HTTP ${res.status}`);
+        const txt = await res.text();
+        if(txt && txt.length>50) return txt;
+      }catch(e){ lastErr = e; }
+    }
+    throw lastErr || new Error('All proxies failed');
+  }
+
+  // ======= Utilities =======
+  const dayMs = 24*60*60*1000;
+  function withinDays(date, days){
+    const now = new Date();
+    const cutoff = new Date(now.getTime() - days*dayMs);
+    return date >= new Date(cutoff.toDateString()); // midnight cutoff
+  }
+  function fmtDate(d){
+    return d.toLocaleString(undefined, { year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+  }
+  function normalize(str){ return (str||"").toLowerCase(); }
+
+  // Parse RSS/Atom into a common shape
+  function parseFeed(xmlText, sourceName){
+    const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+    // Check parsererror
+    if(doc.querySelector("parsererror")) throw new Error("Invalid XML for "+sourceName);
+
+    const items = [];
+    // RSS 2.0 items
+    doc.querySelectorAll("channel > item").forEach(item => {
+      const title = item.querySelector("title")?.textContent?.trim() || "(no title)";
+      const link = item.querySelector("link")?.textContent?.trim() || item.querySelector("guid")?.textContent?.trim() || "";
+      const dateStr = item.querySelector("pubDate")?.textContent || item.querySelector("dc\\:date")?.textContent || "";
+      const pub = dateStr ? new Date(dateStr) : new Date();
+      const desc = item.querySelector("description")?.textContent || "";
+      items.push({title, link, pub, source: sourceName, description: desc});
+    });
+
+    // Atom entries
+    doc.querySelectorAll("feed > entry").forEach(entry => {
+      const title = entry.querySelector("title")?.textContent?.trim() || "(no title)";
+      const linkEl = entry.querySelector("link[rel='alternate']") || entry.querySelector("link[href]");
+      const link = linkEl?.getAttribute("href") || "";
+      const dateStr = entry.querySelector("updated")?.textContent || entry.querySelector("published")?.textContent || "";
+      const pub = dateStr ? new Date(dateStr) : new Date();
+      const desc = entry.querySelector("summary")?.textContent || entry.querySelector("content")?.textContent || "";
+      items.push({title, link, pub, source: sourceName, description: desc});
+    });
+
+    return items;
+  }
+
+  async function fetchFeedAny(url){
+    // AllOrigins JSON API to bypass CORS
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+    const res = await fetch(proxyUrl);
+    if(!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+    const data = await res.json();
+    return data.contents; // raw XML
+  }
+
+  function renderSources(feeds){
+    const wrap = document.getElementById('sourceList');
+    wrap.innerHTML = '';
+    feeds.forEach(f => {
+      const el = document.createElement('div');
+      el.className = 'src';
+      el.innerHTML = `<span>●</span><span>${f.name}</span>`;
+      wrap.appendChild(el);
+    });
+    document.getElementById('feedsInput').value = feeds.map(f => `${f.name} | ${f.url}`).join('\n');
+  }
+
+  function renderList(items){
+    const list = document.getElementById('list');
+    const count = document.getElementById('count');
+    list.innerHTML = '';
+    if(!items.length){
+      list.innerHTML = `<div class="empty">No items in the selected window. Try expanding the date range or hitting Refresh.</div>`;
+      count.textContent = '0';
+      return;
+    }
+    items.forEach(it => {
+      const row = document.createElement('div');
+      row.className = 'item';
+      row.innerHTML = `
+        <div class="date">${fmtDate(it.pub)}</div>
+        <div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <a href="${it.link}" target="_blank" rel="noopener noreferrer">${it.title}</a>
+            <span class="srcTag">${it.source}</span>
+          </div>
+          ${it.description ? `<div class="hint" style="margin-top:6px">${truncate(stripTags(it.description), 240)}</div>` : ''}
+        </div>`;
+      list.appendChild(row);
+    });
+    count.textContent = String(items.length);
+  }
+
+  function stripTags(html){
+    const t = document.createElement('div');
+    t.innerHTML = html; return t.textContent || '';
+  }
+  function truncate(s, n){ return s.length>n ? s.slice(0,n-1)+"…" : s }
+
+  // ======= Main logic =======
+  async function loadAndRender(){
+    const status = document.getElementById('status');
+    status.textContent = 'Fetching feeds…';
+    const feeds = getFeeds();
+    renderSources(feeds);
+
+    let days = parseInt(document.getElementById('dateRange').value, 10) || 21;
+    const query = normalize(document.getElementById('search').value);
+
+    const allItems = [];
+    const errors = [];
+
+    // Fetch all feeds in parallel with per-attempt timeouts
+    const results = await Promise.allSettled(
+      feeds.map(async (f) => {
+        try{
+          const xml = await fetchFeedAny(f.url);
+          const items = parseFeed(xml, f.name);
+          return { f, items };
+        }catch(e){ return { f, error: e }; }
+      })
+    );
+
+    const errors = [];
+    for(const r of results){
+      if(r.status === 'fulfilled'){
+        const { f, items } = r.value;
+        for(const it of items){
+          if(!it.pub || isNaN(it.pub.getTime())) continue;
+          if(!withinDays(it.pub, days)) continue;
+          if(query){
+            const hay = `${it.title} ${it.source} ${it.description}`.toLowerCase();
+            if(!hay.includes(query)) continue;
+          }
+          allItems.push(it);
+        }
+      }else{
+        errors.push(r.reason?.f?.name || 'Unknown');
+      }
+    }
+
+    // Sort newest -> oldest
+    allItems.sort((a,b)=> b.pub - a.pub);
+
+    renderList(allItems);
+
+    if(errors.length){
+      status.innerHTML = `Loaded with warnings: Failed to fetch <b>${errors.join(', ')}</b>. You may need to update those feed URLs.`;
+    }else{
+      status.textContent = `Loaded ${allItems.length} item(s).`;
+    }
+  }
+
+  // ======= Events =======
+  document.getElementById('refreshBtn').addEventListener('click', loadAndRender);
+  document.getElementById('dateRange').addEventListener('change', loadAndRender);
+  document.getElementById('search').addEventListener('input', () => {
+    // live filter without re-fetch: re-render from cached data would be ideal; for simplicity we refetch
+    loadAndRender();
+  });
+
+  document.getElementById('saveFeeds').addEventListener('click', () => {
+    const lines = document.getElementById('feedsInput').value.split(/\n+/).map(l=>l.trim()).filter(Boolean);
+    const parsed = lines.map(l => {
+      // Accept either "Name | URL" or just URL
+      const parts = l.split('|');
+      if(parts.length >= 2){
+        return { name: parts[0].trim(), url: parts.slice(1).join('|').trim() };
+      } else {
+        try{
+          const u = new URL(l);
+          return { name: u.hostname, url: l };
+        }catch{ return null }
+      }
+    }).filter(Boolean);
+    if(parsed.length){ setFeeds(parsed); loadAndRender(); }
+  });
+
+  document.getElementById('resetFeeds').addEventListener('click', () => {
+    setFeeds(DEFAULT_FEEDS); loadAndRender();
+  });
+
+  // Initial load
+  renderSources(getFeeds());
+  loadAndRender();
+  </script>
+</body>
+</html>
