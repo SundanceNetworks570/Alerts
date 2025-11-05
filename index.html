@@ -103,25 +103,20 @@
   ];
 
   // Use localStorage to persist custom feeds
-  const FEED_STORAGE_KEY = "security_alerts_feeds_v2";
+  let CURRENT_FEEDS = [...DEFAULT_FEEDS];
   
   function getFeeds(){
-    try{
-      const raw = localStorage.getItem(FEED_STORAGE_KEY);
-      if(!raw) return DEFAULT_FEEDS;
-      const saved = JSON.parse(raw);
-      if(!Array.isArray(saved) || saved.length === 0) return DEFAULT_FEEDS;
-      // sanitize
-      return saved
-        .map(x => (x && typeof x === 'object' && x.url ? x : null))
-        .filter(Boolean);
-    }catch{
+    return CURRENT_FEEDS;
+  }catch{
       return DEFAULT_FEEDS;
     }
   }catch{}
     return DEFAULT_FEEDS;
   }
-  function setFeeds(list){ localStorage.setItem(FEED_STORAGE_KEY, JSON.stringify(list)); }
+  function setFeeds(list){
+    if(Array.isArray(list) && list.length){ CURRENT_FEEDS = list; }
+    else { CURRENT_FEEDS = [...DEFAULT_FEEDS]; }
+  }
 
   // Multi-proxy fetcher to avoid CORS blocks with timeout
   const FETCH_TIMEOUT_MS = 9000; // per-attempt timeout
@@ -311,6 +306,21 @@
   document.getElementById('saveFeeds').addEventListener('click', () => {
     const lines = document.getElementById('feedsInput').value.split(/\n+/).map(l=>l.trim()).filter(Boolean);
     const parsed = lines.map(l => {
+      const parts = l.split('|');
+      if(parts.length >= 2){
+        return { name: parts[0].trim(), url: parts.slice(1).join('|').trim() };
+      } else {
+        try{
+          const u = new URL(l);
+          return { name: u.hostname, url: l };
+        }catch{ return null }
+      }
+    }).filter(Boolean);
+    setFeeds(parsed);
+    renderSources(getFeeds());
+    loadAndRender();
+  });
+    const parsed = lines.map(l => {
       // Accept either "Name | URL" or just URL
       const parts = l.split('|');
       if(parts.length >= 2){
@@ -326,16 +336,18 @@
   });
 
   document.getElementById('resetFeeds').addEventListener('click', () => {
-    try{ localStorage.removeItem(FEED_STORAGE_KEY); }catch{}
+    setFeeds(DEFAULT_FEEDS);
+    renderSources(getFeeds());
+    loadAndRender();
+  }); }catch{}
     setFeeds(DEFAULT_FEEDS);
     renderSources(DEFAULT_FEEDS);
     loadAndRender();
   }); loadAndRender();
   });
 
-  // Initial load
-  const initialFeeds = getFeeds();
-  if(!initialFeeds || initialFeeds.length === 0){ setFeeds(DEFAULT_FEEDS); }
+  // Initial load (no storage dependency)
+  CURRENT_FEEDS = [...DEFAULT_FEEDS];
   renderSources(getFeeds());
   loadAndRender();
   </script>
