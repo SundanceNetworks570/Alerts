@@ -106,7 +106,19 @@
   const FEED_STORAGE_KEY = "security_alerts_feeds_v2";
   
   function getFeeds(){
-    try{ const saved = JSON.parse(localStorage.getItem(FEED_STORAGE_KEY)); if(Array.isArray(saved) && saved.length) return saved; }catch{}
+    try{
+      const raw = localStorage.getItem(FEED_STORAGE_KEY);
+      if(!raw) return DEFAULT_FEEDS;
+      const saved = JSON.parse(raw);
+      if(!Array.isArray(saved) || saved.length === 0) return DEFAULT_FEEDS;
+      // sanitize
+      return saved
+        .map(x => (x && typeof x === 'object' && x.url ? x : null))
+        .filter(Boolean);
+    }catch{
+      return DEFAULT_FEEDS;
+    }
+  }catch{}
     return DEFAULT_FEEDS;
   }
   function setFeeds(list){ localStorage.setItem(FEED_STORAGE_KEY, JSON.stringify(list)); }
@@ -314,10 +326,16 @@
   });
 
   document.getElementById('resetFeeds').addEventListener('click', () => {
-    setFeeds(DEFAULT_FEEDS); loadAndRender();
+    try{ localStorage.removeItem(FEED_STORAGE_KEY); }catch{}
+    setFeeds(DEFAULT_FEEDS);
+    renderSources(DEFAULT_FEEDS);
+    loadAndRender();
+  }); loadAndRender();
   });
 
   // Initial load
+  const initialFeeds = getFeeds();
+  if(!initialFeeds || initialFeeds.length === 0){ setFeeds(DEFAULT_FEEDS); }
   renderSources(getFeeds());
   loadAndRender();
   </script>
